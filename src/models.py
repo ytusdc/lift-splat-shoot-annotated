@@ -54,6 +54,7 @@ class CamEncode(nn.Module):  # 提取图像特征进行图像编码
         x = self.depthnet(x)  # 1x1卷积变换维度  x: 24 x 105(C+D) x 8 x 22
 
         depth = self.get_depth_dist(x[:, :self.D])  # 第二个维度的前D个作为深度维，进行softmax  depth: 24 x 41 x 8 x 22
+                                                    # 第二个维度后64个的数据作为图像特征
         new_x = depth.unsqueeze(1) * x[:, self.D:(self.D + self.C)].unsqueeze(2)  # 将特征通道维和通道维利用广播机制相乘  new_x: 24 x 64 x 41 x 8 x 22
 
         return depth, new_x
@@ -113,16 +114,16 @@ class BevEncode(nn.Module):
         )
 
     def forward(self, x):  # x: 4 x 64 x 200 x 200
-        x = self.conv1(x)  # x: 4 x 64 x 100 x 100
+        x = self.conv1(x)  # 下采样 /2， x: 4 x 64 x 100 x 100
         x = self.bn1(x)
         x = self.relu(x)
 
         x1 = self.layer1(x)  # x1: 4 x 64 x 100 x 100
-        x = self.layer2(x1)  # x: 4 x 128 x 50 x 50
-        x = self.layer3(x)  # x: 4 x 256 x 25 x 25
+        x = self.layer2(x1)  # 下采样 /2， x: 4 x 128 x 50 x 50
+        x = self.layer3(x)   # 下采样 /2， x: 4 x 256 x 25 x 25
 
-        x = self.up1(x, x1)  # 给x进行4倍上采样然后和x1 concat 在一起  x: 4 x 256 x 100 x 100
-        x = self.up2(x)  # 2倍上采样->3x3卷积->1x1卷积  x: 4 x 1 x 200 x 200
+        x = self.up1(x, x1)  # 上采样 *4， 给x进行4倍上采样然后和x1 concat 在一起  x: 4 x 256 x 100 x 100
+        x = self.up2(x)      # 上采样 *2， 2倍上采样->3x3卷积->1x1卷积  x: 4 x 1 x 200 x 200
 
         return x
 
@@ -130,19 +131,20 @@ class BevEncode(nn.Module):
 class LiftSplatShoot(nn.Module):
     def __init__(self, grid_conf, data_aug_conf, outC):
         super(LiftSplatShoot, self).__init__()
-        self.grid_conf = grid_conf   # 网格配置参数
-        self.data_aug_conf = data_aug_conf   # 数据增强配置参数
+        self.grid_conf = grid_conf          # 网格配置参数
+        self.data_aug_conf = data_aug_conf  # 数据增强配置参数
 
+        # 划分网格
         dx, bx, nx = gen_dx_bx(self.grid_conf['xbound'],
                                               self.grid_conf['ybound'],
                                               self.grid_conf['zbound'],
-                                              )  # 划分网格
-        self.dx = nn.Parameter(dx, requires_grad=False)  # [0.5,0.5,20]
-        self.bx = nn.Parameter(bx, requires_grad=False)  # [-49.5,-49.5,0]
-        self.nx = nn.Parameter(nx, requires_grad=False)  # [200,200,1]
+                                              )
+        self.dx = nn.Parameter(dx, requires_grad=False)  # [0.5,0.5,20] 三个轴上格子间距
+        self.bx = nn.Parameter(bx, requires_grad=False)  # [-49.5,-49.5,0] 三个轴上的起始坐标
+        self.nx = nn.Parameter(nx, requires_grad=False)  # [200,200,1] 三个轴上的格子数量
 
-        self.downsample = 16  # 下采样倍数
-        self.camC = 64  # 图像特征维度
+        self.downsample = 16    # 下采样倍数
+        self.camC = 64          # 图像特征维度
         self.frustum = self.create_frustum()  # frustum: DxfHxfWx3(41x8x22x3)
         self.D, _, _, _ = self.frustum.shape  # D: 41
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
@@ -150,20 +152,66 @@ class LiftSplatShoot(nn.Module):
 
         # toggle using QuickCumsum vs. autograd
         self.use_quickcumsum = True
+
+    '''
+    在图像平面上划分网格， 创造视锥
+    1.根据图像像素坐标创建截锥体,截锥体的维度为DxfHxfWx3(fH = H/16, fW = W/16),在这里截锥体的维度是41x8x22x3。
+    注意！！截锥体里保存的数据是什么，实际上是图像像素坐标在下采样之后的像素坐标。其实际意义就是在一个栅格中的图像坐标和深度(u,v,d)。
     
+    看名字是建立视锥体，我觉得应该叫做create_sample_points，因为该部分代码是根据下采样倍率得到对应在输入图像上的采样点，
+    并且在对应的采样点上补充设计的深度坐标，4到45米，41长度的深度。
+    '''
     def create_frustum(self):
         # make grid in image plane
         ogfH, ogfW = self.data_aug_conf['final_dim']  # 原始图片大小  ogfH:128  ogfW:352
         fH, fW = ogfH // self.downsample, ogfW // self.downsample  # 下采样16倍后图像大小  fH: 8  fW: 22
         ds = torch.arange(*self.grid_conf['dbound'], dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW)  # 在深度方向上划分网格 ds: DxfHxfW(41x8x22)
-        D, _, _ = ds.shape # D: 41 表示深度方向上网格的数量
+        D, _, _ = ds.shape  # D: 41 表示深度方向上网格的数量
+
+        '''
+        ------------------------------------------------------------------------------------------
+        torch.linspace(start, end, steps=100, out=None, dtype=None,
+                       layout=torch.strided, device=None, requires_grad=False)
+        作用：返回一个一维的tensor（张量），这个张量包含了从start到end，分成steps个线段得到的向量
+        常用参数：
+          start：开始值
+          end：结束值
+          steps：分割的点数，默认是100
+          dtype：返回值（张量）的数据类型
+        ------------------------------------------------------------------------------------------
+        '''
         xs = torch.linspace(0, ogfW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW)  # 在0到351上划分22个格子 xs: DxfHxfW(41x8x22)
         ys = torch.linspace(0, ogfH - 1, fH, dtype=torch.float).view(1, fH, 1).expand(D, fH, fW)  # 在0到127上划分8个格子 ys: DxfHxfW(41x8x22)
 
-        # D x H x W x 3
+        # D x H x W x 3  -> 41 x 8 x 22 x 3
         frustum = torch.stack((xs, ys, ds), -1)  # 堆积起来形成网格坐标, frustum[i,j,k,0]就是(i,j)位置，深度为k的像素的宽度方向上的栅格坐标   frustum: DxfHxfWx3
         return nn.Parameter(frustum, requires_grad=False)
 
+
+    '''
+        imgs:   图像数据
+        rots: 相机坐标系到自车坐标系的旋转矩阵
+        trans:  相机坐标系到自车坐标系的平移向量
+        intrins:  相机内参
+        post_rots:  数据增强的像素坐标旋转映射关系
+        post_trans:   数据增强的像素坐标平移映射关系
+        imgs: 4 x 5 x 3 x 128 x 352
+        rots: 4 x 5 x 3 x 3]
+        trans: 4 x 5 x 3
+        intrins: 4 x 5 x 3 x 3
+        post_rots: 4 x 5 x 3 x 3
+        post_trans: 4 x 5 x 3
+        binimgs: 4 x 1 x 200 x 200
+    '''
+
+    '''
+    2.结合相机的内外参数将截锥体中图像坐标先转化为相机坐标，再转化为车体坐标系的空间坐标(x,y,z)。
+    geom_feats:6x4x41x8x22x3
+    注意！！这里面的截锥体就生成了单目相机图像的像素在所有可能深度上的车体坐标系的三维空间位置。
+    
+    这里才是真正的建立视锥体，或者也可以叫做建立视锥点云，这里其实就是位置点，
+    和图像特征一一对应，然后对引导图像特征填入BEV空间中。
+    '''
     def get_geometry(self, rots, trans, intrins, post_rots, post_trans):
         """Determine the (x,y,z) locations (in the ego frame)
         of the points in the point cloud.
@@ -174,19 +222,23 @@ class LiftSplatShoot(nn.Module):
         # undo post-transformation
         # B x N x D x H x W x 3
         # 抵消数据增强及预处理对像素的变化
-        points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3)
-        points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        # 但是数据增强是如何影响视锥的呢，为什么是减去，
+        # 不应该是视锥也做同样的增强与图片对应起来嘛，而且他俩维度也不一样啊，怎么相减，是利用了广播机制吗 ？
+        points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3)  #减去数据增强时的平移变换
+        points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))  #把图像转回去
 
         # cam_to_ego
+        # 将像素坐标(u,v,d)变成齐次坐标(du,dv,d), 我看了一下齐次坐标的定义，然后才明白，就是u，v,同时乘以d,然后在与d在拼接起来
         points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
                             points[:, :, :, :, :, 2:3]
-                            ), 5)  # 将像素坐标(u,v,d)变成齐次坐标(du,dv,d)
-        # d[u,v,1]^T=intrins*rots^(-1)*([x,y,z]^T-trans)
+                            ), 5)
+        # d[u,v,1]^T=intrins*rots^(-1)*([x,y,z]^T-trans)  # 逆公式表达出x,y,z即可
+        # 利用内外参将像素坐标转换到车体坐标下
         combine = rots.matmul(torch.inverse(intrins))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += trans.view(B, N, 1, 1, 1, 3)  # 将像素坐标d[u,v,1]^T转换到车体坐标系下的[x,y,z]^T
 
-        return points  # B x N x D x H x W x 3 (4 x 6 x 41 x 8 x 22 x 3)
+        return points  # B x N x D x H x W x 3 (4 x 6 x 41 x 8 x 22 x 3), 此时最后一维度代表的就是车坐标下的，x,y,z
 
     def get_cam_feats(self, x):
         """Return B x N x D x H/downsample x W/downsample x C
@@ -194,12 +246,16 @@ class LiftSplatShoot(nn.Module):
         B, N, C, imH, imW = x.shape  # B: 4  N: 6  C: 3  imH: 128  imW: 352
 
         x = x.view(B*N, C, imH, imW)  # B和N两个维度合起来  x: 24 x 3 x 128 x 352
-        x = self.camencode(x) # 进行图像编码  x: B*N x C x D x fH x fW(24 x 64 x 41 x 8 x 22)
+        x = self.camencode(x)  # 进行图像编码  x: B*N x C x D x fH x fW(24 x 64 x 41 x 8 x 22)
+        # 此处将前两维度拆开时能保证顺序和合并前一样吗，不然我总怀疑最后图片输入的特征及深度分布如何映射到根据相机内外参数得到的视锥栅格里的
         x = x.view(B, N, self.camC, self.D, imH//self.downsample, imW//self.downsample)  #将前两维拆开 x: B x N x C x D x fH x fW(4 x 6 x 64 x 41 x 8 x 22)
         x = x.permute(0, 1, 3, 4, 5, 2)  # x: B x N x D x fH x fW x C(4 x 6 x 41 x 8 x 22 x 64)
 
         return x
 
+    '''
+    因为很多位置点会落到同一个grid里面，这里会做棱台累加和的操作。最后在一个pillar求平均，这一块代码比较复杂，但做得事情很简单，
+    '''
     def voxel_pooling(self, geom_feats, x):
         # geom_feats: B x N x D x H x W x 3 (4 x 6 x 41 x 8 x 22 x 3)
         # x: B x N x D x fH x fW x C(4 x 6 x 41 x 8 x 22 x 64)
@@ -226,6 +282,7 @@ class LiftSplatShoot(nn.Module):
         geom_feats = geom_feats[kept]
 
         # get tensors from the same voxel next to each other
+        # 从彼此相邻的相同体素中获取tensor
         ranks = geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B)\
             + geom_feats[:, 1] * (self.nx[2] * B)\
             + geom_feats[:, 2] * B\
@@ -250,6 +307,8 @@ class LiftSplatShoot(nn.Module):
         return final  # final: 4 x 64 x 200 x 200
 
     def get_voxels(self, x, rots, trans, intrins, post_rots, post_trans):
+        # 确定点云中点的 (x,y,z) 位置（在小车坐标系中）。
+        # 获取几何特征
         geom = self.get_geometry(rots, trans, intrins, post_rots, post_trans)  # 像素坐标到自车中坐标的映射关系 geom: B x N x D x H x W x 3 (4 x 6 x 41 x 8 x 22 x 3)
         x = self.get_cam_feats(x)  # 提取图像特征并预测深度编码 x: B x N x D x fH x fW x C(4 x 6 x 41 x 8 x 22 x 64)
 

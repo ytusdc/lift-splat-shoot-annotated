@@ -88,31 +88,70 @@ class NuscData(torch.utils.data.Dataset):
         return scenes
 
     def prepro(self):  # 将self.scenes中的所有sample取出并依照 scene_token和timestamp排序
+        """
+        存储当前划分的所有样本，且按场景和时间戳排序
+        获取一系列样本, 包含了传感器采集到的信息、标注信息等等。形如：
+        { 'token': 'ca9a282c9e77460f8360f564131a8af5',
+          'timestamp': 1532402927647951,
+          'prev': '',
+          'next': '39586f9d59004284a7114a68825e8eec',
+          'scene_token': 'cc8c0bf57f984915a77078b10eb33198',
+          'data': {'RADAR_FRONT': '37091c75b9704e0daa829ba56dfa0906',
+                   'RADAR_FRONT_LEFT': '11946c1461d14016a322916157da3c7d',
+                   'RADAR_FRONT_RIGHT': '491209956ee3435a9ec173dad3aaf58b',
+                   'RADAR_BACK_LEFT': '312aa38d0e3e4f01b3124c523e6f9776',
+                   'RADAR_BACK_RIGHT': '07b30d5eb6104e79be58eadf94382bc1',
+                   'LIDAR_TOP': '9d9bf11fb0e144c8b446d54a8a00184f',
+                   'CAM_FRONT': 'e3d495d4ac534d54b321f50006683844',
+                   'CAM_FRONT_RIGHT': 'aac7867ebf4f446395d29fbd60b63b3b',
+                   'CAM_BACK_RIGHT': '79dbb4460a6b40f49f9c150cb118247e',
+                   'CAM_BACK': '03bea5763f0f4722933508d5999c5fd8',
+                   'CAM_BACK_LEFT': '43893a033f9c46d4a51b5e08a67a1eb7',
+                   'CAM_FRONT_LEFT': 'fe5422747a7d4268a4b07fc396707b23'},
+          'anns': ['ef63a697930c4b20a6b9791f423351da',
+                   '6b89da9bf1f84fd6a5fbe1c3b236f809',
+                   ...]},
+        """
         samples = [samp for samp in self.nusc.sample]
 
+        # 删除不在划分中的样本
         # remove samples that aren't in this split
         samples = [samp for samp in samples if
                    self.nusc.get('scene', samp['scene_token'])['name'] in self.scenes]
 
         # sort by scene, timestamp (only to make chronological viz easier)
+        # 按场景、时间戳排序（只是为了使按时间顺序更容易）
         samples.sort(key=lambda x: (x['scene_token'], x['timestamp']))
 
         return samples
 
     def sample_augmentation(self):
-        H, W = self.data_aug_conf['H'], self.data_aug_conf['W']  # (900,1600)
-        fH, fW = self.data_aug_conf['final_dim']  # (128, 352)，表示变换之后最终的图像大小
+        """
+        返回数据增强的相关设置
+        resize：         随机缩放比率
+        resize_dims：    缩放后的尺度
+        crop：           随机裁剪：(crop_w, crop_h, crop_w + fW, crop_h + fH) 分别为左上和右下的坐标
+        flip：           是否左右反转 bool
+        rotate：         随机旋转的角度
+        """
+        H, W = self.data_aug_conf['H'], self.data_aug_conf['W']  # (900,1600) # 图像的原始尺寸
+        fH, fW = self.data_aug_conf['final_dim']  # (128, 352)，表示变换之后最终的图像大小, 最终需要的尺寸
         if self.is_train:  # 训练集数据增强
+            # 函数原型： numpy.random.uniform(low,high,size)
+            # 功能：从一个均匀分布[low,high)中随机采样，注意定义域是左闭右开，即包含low，不包含high.
+            # ----------------- 随机选择比率缩小 ----------------
             resize = np.random.uniform(*self.data_aug_conf['resize_lim'])
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
+
+            # crop_h：高度需要裁剪的大小；crop_w：宽度需要裁剪的大小，如果newW <= fw则为0；
             crop_h = int((1 - np.random.uniform(*self.data_aug_conf['bot_pct_lim'])) * newH) - fH
             crop_w = int(np.random.uniform(0, max(0, newW - fW)))
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
-            flip = False
+            flip = False   # 0.5的概率会采用翻转
             if self.data_aug_conf['rand_flip'] and np.random.choice([0, 1]):
                 flip = True
-            rotate = np.random.uniform(*self.data_aug_conf['rot_lim'])
+            rotate = np.random.uniform(*self.data_aug_conf['rot_lim'])   # 旋转的角度
         else:  # 测试集数据增强
             resize = max(fH / H, fW / W)  # 缩小的倍数取二者较大值: 0.22
             resize_dims = (int(W * resize), int(H * resize))  # 保证H和W以相同的倍数缩放，resize_dims=(352, 198)
@@ -120,29 +159,64 @@ class NuscData(torch.utils.data.Dataset):
             crop_h = int((1 - np.mean(self.data_aug_conf['bot_pct_lim'])) * newH) - fH  # 48
             crop_w = int(max(0, newW - fW) / 2)  # 0
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)  # (0, 48, 352, 176)，对应裁剪的左上角和右下角的坐标
+            # 验证时关闭随机翻转与旋转
             flip = False  # 不翻转
             rotate = 0  # 不旋转
         return resize, resize_dims, crop, flip, rotate
 
     def get_image_data(self, rec, cams):
-        imgs = []
-        rots = []
-        trans = []
-        intrins = []
-        post_rots = []
-        post_trans = []
+        imgs = []               # 经过数据增强、归一化与标准化后的图像tensor
+        rots = []               # 相机坐标系相对的旋转参数
+        trans = []              # 相机坐标系相对的平移参数
+        intrins = []            # 相机的内参
+        post_rots = []          # 图像增强旋转对应的单应旋转矩阵
+        post_trans = []         # 图像增强平移对应的单应平移矩阵
+        # 从每一个选择的相机数据中读取数据
         for cam in cams:
-            samp = self.nusc.get('sample_data', rec['data'][cam])  # 根据相机通道选择对应的sample_data
-            imgname = os.path.join(self.nusc.dataroot, samp['filename'])  # 图片的路径
-            img = Image.open(imgname)  # 读取图像 1600 x 900
-            post_rot = torch.eye(2)  # 增强前后像素点坐标的旋转对应关系
+            """ 
+            rec 表示当前选取的样本；参考 prepro 的数据格式
+            读取图片信息, 图片信息如下：
+            {'token': 'd6206af179d44816b034e3cbd8ab5eea',
+             'sample_token': 'cd9964f8c3d34383b16e9c2997de1ed0',
+             'ego_pose_token': 'd6206af179d44816b034e3cbd8ab5eea',
+             'calibrated_sensor_token': '19eeff32f00f414fb9489ccab9c6c2c7',
+             'timestamp': 1535657108254799,
+             'fileformat': 'jpg',
+             'is_key_frame': True,
+             'height': 900,
+             'width': 1600,
+             'filename': 'samples/CAM_FRONT_LEFT/n008-2018-08-30-15-16-55-0400__CAM_FRONT_LEFT__1535657108254799.jpg',
+             'prev': '',
+             'next': '44398719bd8f4a94b36f89d8da649adf',
+             'sensor_modality': 'camera',
+             'channel': 'CAM_FRONT_LEFT'}
+            """
+            samp = self.nusc.get('sample_data', rec['data'][cam])           # 根据相机通道选择对应的sample_data
+            imgname = os.path.join(self.nusc.dataroot, samp['filename'])    # 图片的路径
+            img = Image.open(imgname)   # 读取图像 1600 x 900
+            post_rot = torch.eye(2)     # 增强前后像素点坐标的旋转对应关系
             post_tran = torch.zeros(2)  # 增强前后像素点坐标的平移关系
+
+            """ 读取该图片的相关信息，包括旋转，平移及相机内参, 如：
+            {'token': '19eeff32f00f414fb9489ccab9c6c2c7',
+             'sensor_token': 'ec4b5d41840a509984f7ec36419d4c09',
+             'translation': [1.5752559464, 0.500519383135, 1.50696032589],
+             'rotation': [0.6812088525125634,
+                          -0.6687507165046241,
+                          0.2101702448905517,
+                          -0.21108161122114324],
+             'camera_intrinsic': [[1257.8625342125129, 0.0, 827.2410631095686],
+                                  [0.0, 1257.8625342125129, 450.915498205774],
+                                  [0.0, 0.0, 1.0]]}
+            """
 
             sens = self.nusc.get('calibrated_sensor', samp['calibrated_sensor_token'])  # 相机record
             intrin = torch.Tensor(sens['camera_intrinsic'])  # 相机内参
             rot = torch.Tensor(Quaternion(sens['rotation']).rotation_matrix)  # 相机坐标系相对于ego坐标系的旋转矩阵
             tran = torch.Tensor(sens['translation'])  # 相机坐标系相对于ego坐标系的平移矩阵
 
+            # ------------------------ 数据增强 -------------------------
+            # 增强设置（调整大小、裁剪、水平翻转、旋转）
             # augmentation (resize, crop, horizontal flip, rotate)
             resize, resize_dims, crop, flip, rotate = self.sample_augmentation()  # 获取数据增强的参数
             img, post_rot2, post_tran2 = img_transform(img, post_rot, post_tran,
@@ -154,7 +228,7 @@ class NuscData(torch.utils.data.Dataset):
                                                        )  # 进行数据增强: resize->crop,并得到增强前后像素点坐标的对应关系
 
             # for convenience, make augmentation matrices 3x3
-
+            # 为方便起见，将增强矩阵设为 3x3
             # 写成3维矩阵的形式
             post_tran = torch.zeros(3)
             post_rot = torch.eye(3)
@@ -176,23 +250,64 @@ class NuscData(torch.utils.data.Dataset):
                              nsweeps=nsweeps, min_distance=2.2)
         return torch.Tensor(pts)[:3]  # x,y,z
 
+    # 世界坐标系下的标注信息转化到车辆坐标系下，得到对应分割的BEV视图。
     def get_binimg(self, rec):
-
         # 得到自车坐标系相对于地图全局坐标系的位姿
+        """ 读取车辆姿态信息, 如：
+        {'token': '2b2d98f0daec4fdeb6716d1f6b546a5c',
+         'timestamp': 1535489298047428,
+         'rotation': [0.3559189826878399,
+                      0.0018057365272423622,
+                      -0.009148368803714158,
+                      0.934470290820569],
+         'translation': [1316.378185650685, 1038.5936853755643, 0.0]}
+        """
         egopose = self.nusc.get('ego_pose',
                                 self.nusc.get('sample_data', rec['data']['LIDAR_TOP'])['ego_pose_token'])
-        trans = -np.array(egopose['translation'])  # 平移
-        rot = Quaternion(egopose['rotation']).inverse  # 旋转
-        img = np.zeros((self.nx[0], self.nx[1]))  # 200, 200的网格
-        for tok in rec['anns']:  # 遍历该sample的每个annotation token
+        trans = -np.array(egopose['translation'])       # 平移
+        rot = Quaternion(egopose['rotation']).inverse   # 旋转
+        img = np.zeros((self.nx[0], self.nx[1]))        # 初始化图像, 200 x 200的网格
+        for tok in rec['anns']:                         # 遍历该sample的每个annotation token
+            # 读取当前标注信息
+            """如：
+            {'token': 'f5f9b9db580d412083fd18ee4fda0b8e',
+             'sample_token': '2021b6b367984ad7b18464a550d0ae8d',
+             'instance_token': '19804c352c0a4767b61b8d0709d1db99',
+             'visibility_token': '4',
+             'attribute_tokens': ['ab83627ff28b465b85c427162dec722f'],
+             'translation': [1294.421, 1031.646, 0.507],
+             'size': [0.552, 0.918, 1.739],
+             'rotation': [0.9380281279379362, 0.0, 0.0, 0.3465591308813702],
+             'prev': '70885047ed1c4e90924bf304c830501b',
+             'next': 'd3ba83018b4c45b0b3523bab752b08c3',
+             'num_lidar_pts': 0,
+             'num_radar_pts': 0,
+             'category_name': 'human.pedestrian.adult'}
+            """
             inst = self.nusc.get('sample_annotation', tok)  # 找到该annotation
             # add category for lyft
+            # 为 lyft 添加类别， 如果标注为 vehicle 则跳过此条标注信息
             if not inst['category_name'].split('.')[0] == 'vehicle':  # 只关注车辆
                 continue
-            box = Box(inst['translation'], inst['size'], Quaternion(inst['rotation']))  # 参数分别为center, size, orientation
-            box.translate(trans)  # 将box的center坐标从全局坐标系转换到自车坐标系下
-            box.rotate(rot)  # 将box的center坐标从全局坐标系转换到自车坐标系下
 
+            """
+            Box() 为表示 3d 框的简单数据类，包括标签、分数和速度。
+            使用说明
+                :param center:          以 x, y, z 形式给出的框的中心。
+                :param size:            框的宽度、长度、高度。
+                :param orientation：    box方向。
+                :param label：          整数标签，可选。
+                :param score：          分类分数，可选。
+                :param velocity:        x, y, z 方向的box速度。
+                :param name:            box名称，可选。 可以使用例如 for 表示类别名称。
+                :param token：          来自 DB 的唯一字符串标识符。
+            """
+
+            box = Box(inst['translation'], inst['size'], Quaternion(inst['rotation']))  # 参数分别为center, size, orientation
+            box.translate(trans)  # 平移, 将box的center坐标从全局坐标系转换到自车坐标系下
+            box.rotate(rot)       # 旋转, 将box的center坐标从全局坐标系转换到自车坐标系下
+
+            # box.bottom_corners() 返回box的四个底角。前两个面朝前，后两个面朝后。shape: [3, 4]
             pts = box.bottom_corners()[:2].T  # 三维边界框取底面的四个角的(x,y)值后转置, 4x2
             pts = np.round(
                 (pts - self.bx[:2] + self.dx[:2] / 2.) / self.dx[:2]
@@ -202,7 +317,13 @@ class NuscData(torch.utils.data.Dataset):
 
         return torch.Tensor(img).unsqueeze(0)  # 转化为Tensor 1x200x200
 
-    def choose_cams(self):  # 随机选择摄像机通道
+    def choose_cams(self):  # 随机选择摄像机通道， 也算数据增强的一种
+        # numpy.random.choice(a, size=None, replace=True, p=None)
+        # 从a(只要是ndarray都可以，但必须是一维的)中随机抽取数字，并组成指定大小(size)的数组
+        # replace:True表示可以取相同数字，False表示不可以取相同数字
+        # 数组p：与数组a相对应，表示取数组a中每个元素的概率，默认为选取每个元素的概率相同。
+        # ---------------------- 这里表示随机选取 'Ncams' 个相机的图片 ---------------------
+
         if self.is_train and self.data_aug_conf['Ncams'] < len(self.data_aug_conf['cams']):
             cams = np.random.choice(self.data_aug_conf['cams'], self.data_aug_conf['Ncams'],
                                     replace=False)
@@ -227,7 +348,7 @@ class VizData(NuscData):
 
         cams = self.choose_cams()
         imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
-        lidar_data = self.get_lidar_data(rec, nsweeps=3)
+        lidar_data = self.get_lidar_data(rec, nsweeps=3)  # 获取雷达数据， nsweeps：先前帧数
         binimg = self.get_binimg(rec)
 
         return imgs, rots, trans, intrins, post_rots, post_trans, lidar_data, binimg
@@ -267,6 +388,8 @@ def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz,
         'vizdata': VizData,
         'segmentationdata': SegmentationData,
     }[parser_name]  # 根据传入的参数选择数据解析器
+
+    # 加载训练集 与 验证集
     traindata = parser(nusc, is_train=True, data_aug_conf=data_aug_conf,
                        grid_conf=grid_conf)
     valdata = parser(nusc, is_train=False, data_aug_conf=data_aug_conf,

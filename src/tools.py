@@ -26,49 +26,60 @@ def get_lidar_data(nusc, sample_rec, nsweeps, min_distance):
     Returned tensor is 5(x, y, z, reflectance, dt) x N
     Adapted from https://github.com/nutonomy/nuscenes-devkit/blob/master/python-sdk/nuscenes/utils/data_classes.py#L56
     """
+    # 初始化返回值
     points = np.zeros((5, 0))
 
     # Get reference pose and timestamp.
     ref_sd_token = sample_rec['data']['LIDAR_TOP']
-    ref_sd_rec = nusc.get('sample_data', ref_sd_token)
-    ref_pose_rec = nusc.get('ego_pose', ref_sd_rec['ego_pose_token'])
-    ref_cs_rec = nusc.get('calibrated_sensor', ref_sd_rec['calibrated_sensor_token'])
-    ref_time = 1e-6 * ref_sd_rec['timestamp']
+    ref_sd_rec = nusc.get('sample_data', ref_sd_token)                                  # 读取顶部激光雷达数据
+    ref_pose_rec = nusc.get('ego_pose', ref_sd_rec['ego_pose_token'])                   # 获取车辆姿态数据
+    ref_cs_rec = nusc.get('calibrated_sensor', ref_sd_rec['calibrated_sensor_token'])   # 获取雷达传感器内外参数
+    ref_time = 1e-6 * ref_sd_rec['timestamp']                                           # 读取时间戳
 
     # Homogeneous transformation matrix from global to _current_ ego car frame.
+    # 从全局到_当前_自我汽车框架的单应变换矩阵。
     car_from_global = transform_matrix(ref_pose_rec['translation'], Quaternion(ref_pose_rec['rotation']),
                                         inverse=True)
 
     # Aggregate current and previous sweeps.
+    # 集成当前和以前的sweeps    nsweeps：先前的帧数
+    # sample_data_token 和 ref_sd_token是一致的；current_sd_rec 和 ref_sd_rec也是一致的；但每次循环之后会改变
     sample_data_token = sample_rec['data']['LIDAR_TOP']
     current_sd_rec = nusc.get('sample_data', sample_data_token)
     for _ in range(nsweeps):
-        # Load up the pointcloud and remove points close to the sensor.
+        # Load up the pointcloud and remove points close to the sensor.  # 加载点云
         current_pc = LidarPointCloud.from_file(os.path.join(nusc.dataroot, current_sd_rec['filename']))
-        current_pc.remove_close(min_distance)
+        current_pc.remove_close(min_distance)  # 删除距离原点在一定半径（min_distance）内太近的点。
 
         # Get past pose.
+        # 获取先前的位姿
         current_pose_rec = nusc.get('ego_pose', current_sd_rec['ego_pose_token'])
         global_from_car = transform_matrix(current_pose_rec['translation'],
                                             Quaternion(current_pose_rec['rotation']), inverse=False)
 
         # Homogeneous transformation matrix from sensor coordinate frame to ego car frame.
+        # 从传感器坐标系到_当前_自我汽车框架的单应变换矩阵。
         current_cs_rec = nusc.get('calibrated_sensor', current_sd_rec['calibrated_sensor_token'])
         car_from_current = transform_matrix(current_cs_rec['translation'], Quaternion(current_cs_rec['rotation']),
                                             inverse=False)
 
         # Fuse four transformation matrices into one and perform transform.
+        # reduce函数先从列表（或序列）中取出2个元素执行指定函数，并将输出结果与第3个元素传入函数，…，以此类推，直到列表每个元素都取完。
         trans_matrix = reduce(np.dot, [car_from_global, global_from_car, car_from_current])
         current_pc.transform(trans_matrix)
 
         # Add time vector which can be used as a temporal feature.
+        # 添加可用作时间特征的时间向量。
         time_lag = ref_time - 1e-6 * current_sd_rec['timestamp']
+        # current_pc.nbr_points()： 返回点的个数。
         times = time_lag * np.ones((1, current_pc.nbr_points()))
 
+        # 合并点云
         new_points = np.concatenate((current_pc.points, times), 0)
         points = np.concatenate((points, new_points), 1)
 
         # Abort if there are no previous sweeps.
+        # 如果没有先前的sweeps，则中止。
         if current_sd_rec['prev'] == '':
             break
         else:
@@ -116,19 +127,23 @@ def get_rot(h):  # 根据旋转角度得到旋转矩阵
         [-np.sin(h), np.cos(h)],
     ])
 
-
+"""
+    返回值：
+    img：        增强后的图像
+    post_rot：   旋转矩阵 [2,2]
+    post_tran：  平移矩阵 [1,2]
+"""
 def img_transform(img, post_rot, post_tran,
                   resize, resize_dims, crop,
                   flip, rotate):  # 数据增强
     # adjust image
-    img = img.resize(resize_dims)  # 图像缩放
-    img = img.crop(crop)  # 图像裁剪
+    img = img.resize(resize_dims)  # 图像缩放 # 采用默认的双线性采样缩放图像尺寸
+    img = img.crop(crop)  # 图像裁剪 # img.crop(a0, b0, a1, b1)：a代表横坐标，b代表纵坐标。0：左上角坐标 1：右下角坐标
     if flip:
         img = img.transpose(method=Image.FLIP_LEFT_RIGHT)  # 左右翻转
     img = img.rotate(rotate)  # 旋转
 
     # post-homography transformation
-
     # 数据增强后的图像上的某一点的坐标需要对应回增强前的坐标
     post_rot *= resize  # [[0.22,0],[0,0.22]]
     post_tran -= torch.Tensor(crop[:2])  # [0,-48]

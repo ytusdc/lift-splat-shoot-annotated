@@ -8,7 +8,9 @@ from fire import Fire
 
 import src
 
-
+# fire.Fire()： 通过使用字典，我们可以有选择性地将一些函数暴露给命令行。
+# 然后可以通过命令行传参的方式使用指定函数。
+# 如： python main.py eval_model_iou      运行src.explore.eval_model_iou()
 if __name__ == '__main__':
     Fire({
         'lidar_check': src.explore.lidar_check,
@@ -18,3 +20,8 @@ if __name__ == '__main__':
         'eval_model_iou': src.explore.eval_model_iou,
         'viz_model_preds': src.explore.viz_model_preds,
     })
+
+    # src.train.train(version='mini', dataroot='./data/nuscenes', logdir='./runs', gpuid=0, bsz=2)
+
+    # src.explore.viz_model_preds(version='mini', modelf='./weights/pre_model.pt', dataroot='./data/nuscenes',
+    #                             map_folder='./data/nuscenes/mini')
