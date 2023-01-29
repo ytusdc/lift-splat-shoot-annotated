@@ -128,6 +128,7 @@ def get_rot(h):  # 根据旋转角度得到旋转矩阵
     ])
 
 """
+    img_transform 对输入图像进行数据增强（被data.py中的get_image_data调用）
     返回值：
     img：        增强后的图像
     post_rot：   旋转矩阵 [2,2]
@@ -187,12 +188,14 @@ normalize_img = torchvision.transforms.Compose((
                                  std=[0.229, 0.224, 0.225]),
 ))
 
-
+# gen_dx_bx 划分网格 （被model.py中的LiftSplatShoot 类中的初始化函数调用）
 def gen_dx_bx(xbound, ybound, zbound):  # 划分网格
-    dx = torch.Tensor([row[2] for row in [xbound, ybound, zbound]])  # dx=[0.5,0.5,20] 分别为x, y, z三个方向上的网格间距
-    bx = torch.Tensor([row[0] + row[2]/2.0 for row in [xbound, ybound, zbound]])  # bx=[-49.75,-49.75,0]  分别为x, y, z三个方向上第一个格子的坐标
-    nx = torch.LongTensor([(row[1] - row[0]) / row[2] for row in [xbound, ybound, zbound]])  # nx=[200,200,1]  分别为x, y, z三个方向上格子的数量
-
+    # dx=[0.5,0.5,20] 分别为x, y, z三个方向上的网格间距
+    dx = torch.Tensor([row[2] for row in [xbound, ybound, zbound]])
+    # bx=[-49.75,-49.75,0]  分别为x, y, z三个方向上第一个格子的坐标 或者 分别为x, y, z三个方向上第一个格子中心点的坐标
+    bx = torch.Tensor([row[0] + row[2]/2.0 for row in [xbound, ybound, zbound]])
+    # nx=[200,200,1]  分别为x, y, z三个方向上格子的数量
+    nx = torch.LongTensor([(row[1] - row[0]) / row[2] for row in [xbound, ybound, zbound]])
     return dx, bx, nx
 
 
@@ -215,8 +218,11 @@ class QuickCumsum(torch.autograd.Function):
         kept = torch.ones(x.shape[0], device=x.device, dtype=torch.bool)  # kept: 168648 x
         kept[:-1] = (ranks[1:] != ranks[:-1])  # 筛选出ranks中前后rank值不相等的位置
 
-        x, geom_feats = x[kept], geom_feats[kept]  # rank值相等的点只留下最后一个，即一个batch中的一个格子里只留最后一个点 x: 29072  geom_feats: 29072 x 4
-        x = torch.cat((x[:1], x[1:] - x[:-1]))  # x后一个减前一个，还原到cumsum之前的x，此时的一个点是之前与其rank相等的点的feature的和，相当于把同一个格子的点特征进行了sum
+        # rank值相等的点只留下最后一个，即一个batch中的一个格子里只留最后一个点 x: 29072  geom_feats: 29072 x 4
+        x, geom_feats = x[kept], geom_feats[kept]
+
+        # x后一个减前一个，还原到cumsum之前的x，此时的一个点是之前与其rank相等的点的feature的和，相当于把同一个格子的点特征进行了sum
+        x = torch.cat((x[:1], x[1:] - x[:-1]))
 
         # save kept for backward
         ctx.save_for_backward(kept)

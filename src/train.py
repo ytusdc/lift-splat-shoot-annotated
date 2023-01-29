@@ -21,7 +21,7 @@ def train(version,                      # 数据集的版本
           gpuid=1,                      # gpu的序号
 
           H=900, W=1600,                # 原始的图像尺寸
-          resize_lim=(0.193, 0.225),    # resize的范围  # 数据增强随机缩小图像的比率
+          resize_lim=(0.193, 0.225),    # resize的范围，数据增强随机缩小图像的比率
           final_dim=(128, 352),         # 数据预处理之后最终的图片大小
           bot_pct_lim=(0.0, 0.22),      # 裁剪图片时，图像底部裁剪掉部分所占比例范围 # 最终图像块的区域
           rot_lim=(-5.4, 5.4),          # 训练时旋转图片的角度范围
@@ -36,9 +36,9 @@ def train(version,                      # 数据集的版本
           zbound=[-10.0, 10.0, 20.0],   # 限制z方向的范围并划分网格
           dbound=[4.0, 45.0, 1.0],      # 限制深度方向的范围并划分网格
 
-          bsz=4,            # batchsize
-          nworkers=10,      # 线程数
-          lr=1e-3,          # 学习率
+          bsz=4,              # batchsize
+          nworkers=10,        # 线程数
+          lr=1e-3,            # 学习率
           weight_decay=1e-7,  # 权重衰减系数
           ):
     grid_conf = {   # 网格配置

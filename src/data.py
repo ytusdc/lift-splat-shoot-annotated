@@ -40,6 +40,7 @@ class NuscData(torch.utils.data.Dataset):
 
         print(self)
 
+    # fix_nuscenes_formatting() 调整ncscenes数据格式 (被类初始化函数调用)
     def fix_nuscenes_formatting(self):
         """If nuscenes is stored with trainval/1 trainval/2 ... structure, adjust the file paths
         stored in the nuScenes object.
@@ -75,6 +76,7 @@ class NuscData(torch.utils.data.Dataset):
                         rec['is_key_frame'] and rec['channel'] in self.data_aug_conf['cams']):
                     rec['filename'] = info[rec['filename']]
 
+    # get_scenes() 根据 self.nusc.version 场景分为训练集和验证集(被类初始化函数调用）
     def get_scenes(self):
         # filter by scene split
         split = {
@@ -87,7 +89,7 @@ class NuscData(torch.utils.data.Dataset):
 
         return scenes
 
-    def prepro(self):  # 将self.scenes中的所有sample取出并依照 scene_token和timestamp排序
+    def prepro(self):  # 将self.scenes中的所有sample取出并依照 scene_token和timestamp排序  (被类初始化函数调用)
         """
         存储当前划分的所有样本，且按场景和时间戳排序
         获取一系列样本, 包含了传感器采集到的信息、标注信息等等。形如：
@@ -112,9 +114,9 @@ class NuscData(torch.utils.data.Dataset):
                    '6b89da9bf1f84fd6a5fbe1c3b236f809',
                    ...]},
         """
-        samples = [samp for samp in self.nusc.sample]
+        samples = [samp for samp in self.nusc.sample]  # self.nusc.sample 可以拿到所有的关键帧数据
 
-        # 删除不在划分中的样本
+        # 删除不在划分（训练集或者测试集）中的样本
         # remove samples that aren't in this split
         samples = [samp for samp in samples if
                    self.nusc.get('scene', samp['scene_token'])['name'] in self.scenes]
@@ -125,6 +127,7 @@ class NuscData(torch.utils.data.Dataset):
 
         return samples
 
+    # sample_augmentation() 获取对图片进行数据增强的参数(被get_image_data()函数调用)
     def sample_augmentation(self):
         """
         返回数据增强的相关设置
@@ -139,18 +142,23 @@ class NuscData(torch.utils.data.Dataset):
         if self.is_train:  # 训练集数据增强
             # 函数原型： numpy.random.uniform(low,high,size)
             # 功能：从一个均匀分布[low,high)中随机采样，注意定义域是左闭右开，即包含low，不包含high.
-            # ----------------- 随机选择比率缩小 ----------------
+            # ----------------- 随机选择比率缩小 随机缩放图片大小----------------
             resize = np.random.uniform(*self.data_aug_conf['resize_lim'])
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
 
+            # ----------------- 随机裁剪图片 ----------------
             # crop_h：高度需要裁剪的大小；crop_w：宽度需要裁剪的大小，如果newW <= fw则为0；
             crop_h = int((1 - np.random.uniform(*self.data_aug_conf['bot_pct_lim'])) * newH) - fH
             crop_w = int(np.random.uniform(0, max(0, newW - fW)))
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+
+            # ----------------- 随机翻转图片 ----------------
             flip = False   # 0.5的概率会采用翻转
             if self.data_aug_conf['rand_flip'] and np.random.choice([0, 1]):
                 flip = True
+
+            # ----------------- 随机旋转图片 ----------------
             rotate = np.random.uniform(*self.data_aug_conf['rot_lim'])   # 旋转的角度
         else:  # 测试集数据增强
             resize = max(fH / H, fW / W)  # 缩小的倍数取二者较大值: 0.22
@@ -164,18 +172,19 @@ class NuscData(torch.utils.data.Dataset):
             rotate = 0  # 不旋转
         return resize, resize_dims, crop, flip, rotate
 
+    # get_image_data 得到图像数据以及各种参数信息(被 SegmentationData 类中的__getitem__函数调用)
     def get_image_data(self, rec, cams):
         imgs = []               # 经过数据增强、归一化与标准化后的图像tensor
-        rots = []               # 相机坐标系相对的旋转参数
-        trans = []              # 相机坐标系相对的平移参数
+        rots = []               # 相机坐标系相对的旋转参数  # 相机坐标系到自车坐标系的旋转矩阵
+        trans = []              # 相机坐标系相对的平移参数  # 相机坐标系到自车坐标系的平移向量
         intrins = []            # 相机的内参
-        post_rots = []          # 图像增强旋转对应的单应旋转矩阵
-        post_trans = []         # 图像增强平移对应的单应平移矩阵
+        post_rots = []          # 图像增强旋转对应的单应旋转矩阵  # 数据增强的像素坐标旋转映射关系
+        post_trans = []         # 图像增强平移对应的单应平移矩阵  # 数据增强的像素坐标平移映射关系
         # 从每一个选择的相机数据中读取数据
         for cam in cams:
             """ 
             rec 表示当前选取的样本；参考 prepro 的数据格式
-            读取图片信息, 图片信息如下：
+            读取图片信息, samp 图片信息如下：
             {'token': 'd6206af179d44816b034e3cbd8ab5eea',
              'sample_token': 'cd9964f8c3d34383b16e9c2997de1ed0',
              'ego_pose_token': 'd6206af179d44816b034e3cbd8ab5eea',
@@ -212,7 +221,9 @@ class NuscData(torch.utils.data.Dataset):
 
             sens = self.nusc.get('calibrated_sensor', samp['calibrated_sensor_token'])  # 相机record
             intrin = torch.Tensor(sens['camera_intrinsic'])  # 相机内参
-            rot = torch.Tensor(Quaternion(sens['rotation']).rotation_matrix)  # 相机坐标系相对于ego坐标系的旋转矩阵
+            # 相机坐标系相对于ego坐标系的旋转矩阵
+            # nus中的rotation 是四元数，这个把四元数转换为旋转矩阵
+            rot = torch.Tensor(Quaternion(sens['rotation']).rotation_matrix)
             tran = torch.Tensor(sens['translation'])  # 相机坐标系相对于ego坐标系的平移矩阵
 
             # ------------------------ 数据增强 -------------------------
@@ -245,12 +256,16 @@ class NuscData(torch.utils.data.Dataset):
         return (torch.stack(imgs), torch.stack(rots), torch.stack(trans),
                 torch.stack(intrins), torch.stack(post_rots), torch.stack(post_trans))  # 使用torch.stack组装到一起
 
+    # get_lidar_data 获取雷达数据
     def get_lidar_data(self, rec, nsweeps):
         pts = get_lidar_data(self.nusc, rec,
                              nsweeps=nsweeps, min_distance=2.2)
         return torch.Tensor(pts)[:3]  # x,y,z
 
-    # 世界坐标系下的标注信息转化到车辆坐标系下，得到对应分割的BEV视图。
+    '''
+        世界坐标系下的标注信息转化到车辆坐标系下，得到对应分割的BEV视图。
+        得到自车坐标系相对于地图全局坐标系的位姿 (被SegmentationData 中的__getitem__调用)
+    '''
     def get_binimg(self, rec):
         # 得到自车坐标系相对于地图全局坐标系的位姿
         """ 读取车辆姿态信息, 如：
@@ -263,7 +278,7 @@ class NuscData(torch.utils.data.Dataset):
          'translation': [1316.378185650685, 1038.5936853755643, 0.0]}
         """
         egopose = self.nusc.get('ego_pose',
-                                self.nusc.get('sample_data', rec['data']['LIDAR_TOP'])['ego_pose_token'])
+                                self.nusc.get('sample_data', rec['data']['LIDAR_TOP'])['ego_pose_token'])  # 自车的位置
         trans = -np.array(egopose['translation'])       # 平移
         rot = Quaternion(egopose['rotation']).inverse   # 旋转
         img = np.zeros((self.nx[0], self.nx[1]))        # 初始化图像, 200 x 200的网格
@@ -317,17 +332,21 @@ class NuscData(torch.utils.data.Dataset):
 
         return torch.Tensor(img).unsqueeze(0)  # 转化为Tensor 1x200x200
 
-    def choose_cams(self):  # 随机选择摄像机通道， 也算数据增强的一种
-        # numpy.random.choice(a, size=None, replace=True, p=None)
-        # 从a(只要是ndarray都可以，但必须是一维的)中随机抽取数字，并组成指定大小(size)的数组
-        # replace:True表示可以取相同数字，False表示不可以取相同数字
-        # 数组p：与数组a相对应，表示取数组a中每个元素的概率，默认为选取每个元素的概率相同。
-        # ---------------------- 这里表示随机选取 'Ncams' 个相机的图片 ---------------------
+    # 随机选择摄像机通道， 也算数据增强的一种
+    def choose_cams(self):
+        '''
+            numpy.random.choice(a, size=None, replace=True, p=None)
+            从a(只要是ndarray都可以，但必须是一维的)中随机抽取数字，并组成指定大小(size)的数组
+            replace:True表示可以取相同数字，False表示不可以取相同数字
+            数组p：与数组a相对应，表示取数组a中每个元素的概率，默认为选取每个元素的概率相同。
+        '''
 
+        # ---------------------- 这里表示随机选取 'Ncams' 个相机的图片 ---------------------
         if self.is_train and self.data_aug_conf['Ncams'] < len(self.data_aug_conf['cams']):
             cams = np.random.choice(self.data_aug_conf['cams'], self.data_aug_conf['Ncams'],
                                     replace=False)
         else:
+            # 选择全部的相机通道
             cams = self.data_aug_conf['cams']
         return cams
 
@@ -374,10 +393,17 @@ class SegmentationData(NuscData):
 
         return imgs, rots, trans, intrins, post_rots, post_trans, binimg
 
-
+# worker_rnd_init 获取随机种子（被compile_data 中的Dataloader函数调用）
 def worker_rnd_init(x):  # x是线程id
     np.random.seed(13 + x)
 
+'''
+    compile_data 主要做的工作
+    1、首先是调用nuscenes.nuscenes.NuScenes 库构建了一个nusc的数据集
+    2、然后把nusc作为参数传入parser() 中构建数据解析器traindata和valdata 。
+    3、其中parser 根据输入的参数parser_name有两种选择，一个是VizData,一个是SegmentationData (这两个都是继承自定义的NuscData的Dataset类)
+    然后traindata和valdata 再把这两个参数传入torch.utils.data.DataLoader 构建了训练集和测试集的数据加载器，并返回。
+'''
 
 def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz,
                  nworkers, parser_name):
@@ -395,11 +421,14 @@ def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz,
     valdata = parser(nusc, is_train=False, data_aug_conf=data_aug_conf,
                      grid_conf=grid_conf)
 
+    # 训练数据加载器
     trainloader = torch.utils.data.DataLoader(traindata, batch_size=bsz,
                                               shuffle=True,
                                               num_workers=nworkers,
                                               drop_last=True,
                                               worker_init_fn=worker_rnd_init)  # 给每个线程设置随机种子
+
+    # 验证数据加载器
     valloader = torch.utils.data.DataLoader(valdata, batch_size=bsz,
                                             shuffle=False,
                                             num_workers=nworkers)

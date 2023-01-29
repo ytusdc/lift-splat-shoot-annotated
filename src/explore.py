@@ -229,16 +229,19 @@ def eval_model_iou(version,  # 数据集的版本
                  'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT'],
         'Ncams': 5,  # 读取数据时读取的摄像机通道的数目
     }
+
+    # 调用data.py文件中的compile_data 生成训练集和验证集的数据加载器trainloader和valloader
     trainloader, valloader = compile_data(version, dataroot, data_aug_conf=data_aug_conf,
                                           grid_conf=grid_conf, bsz=bsz, nworkers=nworkers,
                                           parser_name='segmentationdata')  # 获取训练数据和测试数据
 
-    device = torch.device('cpu') if gpuid < 0 else torch.device(f'cuda:{gpuid}')
+    device = torch.device('cpu') if gpuid < 0 else torch.device(f'cuda:{gpuid}') # 如果不能使用gpu(cuda),则使用cpu
 
+    # 调用model.py文件中的compile_model 构造LSS模型
     model = compile_model(grid_conf, data_aug_conf, outC=1)  # 获取模型
     print('loading', modelf)
     model.load_state_dict(torch.load(modelf))  # 读取checkpoint
-    model.to(device)
+    model.to(device)  # 把模型迁移到device设备上
 
     loss_fn = SimpleLoss(1.0).cuda(gpuid)  # 损失函数
 
@@ -247,6 +250,12 @@ def eval_model_iou(version,  # 数据集的版本
     print(val_info)
 
 
+'''
+    xbound=[-50.0, 50.0, 0.5], bev特征大小
+    ybound=[-50.0, 50.0, 0.5],
+    zbound=[-10.0, 10.0, 20.0], LSS论文中不计算物体的高度
+    dbound=[4.0, 45.0, 1.0], 离散深度尺寸，间隔为1
+'''
 def viz_model_preds(version,
                     modelf,
                     dataroot='/data/nuscenes',
